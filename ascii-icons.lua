@@ -86,15 +86,92 @@ return {
   },
 
   -- =====================================================================
-  -- lualine (statusline)
+  -- lualine (statusline) — must use opts function to patch hardcoded
+  -- Nerd Font glyphs that icons_enabled=false does NOT affect.
   -- =====================================================================
   {
     "nvim-lualine/lualine.nvim",
+    opts = function(_, opts)
+      opts.options.icons_enabled = false
+      opts.options.section_separators = ""
+      opts.options.component_separators = "|"
+
+      -- lualine_z: remove Nerd Font clock icon before time
+      opts.sections.lualine_z = {
+        function() return os.date("%R") end,
+      }
+
+      -- lualine_c: fix root_dir icon, drop filetype icon, fix readonly icon
+      local new_c = {}
+      for _, comp in ipairs(opts.sections.lualine_c or {}) do
+        if type(comp) == "table" then
+          if comp[1] == "filetype" and comp.icon_only then
+            -- Drop: uses Nerd Font glyphs via mini.icons
+          elseif type(comp[1]) == "function" and comp.cond ~= nil and comp.color ~= nil then
+            -- root_dir() component — replace with no-icon version
+            table.insert(new_c, LazyVim.lualine.root_dir({ icon = "" }))
+          elseif type(comp[1]) == "function" and comp.cond == nil and comp.color == nil then
+            -- pretty_path() wrapper — replace with ASCII readonly icon
+            table.insert(new_c, { LazyVim.lualine.pretty_path({ readonly_icon = " [RO] " }) })
+          else
+            table.insert(new_c, comp)
+          end
+        else
+          table.insert(new_c, comp)
+        end
+      end
+      opts.sections.lualine_c = new_c
+
+      -- lualine_x: wrap function components to strip Nerd Font PUA icons
+      for _, comp in ipairs(opts.sections.lualine_x or {}) do
+        if type(comp) == "table" and type(comp[1]) == "function" then
+          local orig = comp[1]
+          comp[1] = function(...)
+            local r = orig(...)
+            if type(r) ~= "string" then return r end
+            -- Strip Unicode Private Use Area characters (Nerd Font icons)
+            -- BMP PUA U+E000-U+EFFF: 3-byte starting with 0xEE
+            -- BMP PUA U+F000-U+F8FF: 3-byte starting with 0xEF, 2nd byte 0x80-0xA3
+            -- Supp. PUA-A U+F0000+:  4-byte starting with 0xF3 0xB0+
+            local clean = r
+              :gsub("\238[\128-\191][\128-\191]", "")
+              :gsub("\239[\128-\163][\128-\191]", "")
+              :gsub("\243[\176-\191][\128-\191][\128-\191]", "")
+              :gsub("  +", " "):gsub("^ +", "")
+            return clean
+          end
+        end
+      end
+    end,
+  },
+
+  -- =====================================================================
+  -- vim fillchars — override Nerd Font fold arrows from LazyVim defaults
+  -- =====================================================================
+  {
+    "LazyVim/LazyVim",
+    init = function()
+      vim.opt.fillchars:append({
+        foldopen = "v",
+        foldclose = ">",
+        diff = "/",
+      })
+    end,
+  },
+
+  -- =====================================================================
+  -- gitsigns — override Nerd Font delete markers
+  -- =====================================================================
+  {
+    "lewis6991/gitsigns.nvim",
     opts = {
-      options = {
-        icons_enabled = false,
-        section_separators = "",
-        component_separators = "|",
+      signs = {
+        delete = { text = "_" },
+        topdelete = { text = "-" },
+      },
+      signs_staged = {
+        delete = { text = "_" },
+        topdelete = { text = "-" },
       },
     },
   },
