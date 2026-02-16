@@ -20,13 +20,20 @@ set -euo pipefail
 # Usage:
 #   bash package-nvim-offline.sh [version-tag]
 #   e.g. bash package-nvim-offline.sh v1.0.0
+#
+# Requires:
+#   - GITHUB_API_TOKEN env var (GitHub PAT with repo scope)
+#   - curl
 # ==========================================================================
 
+GITHUB_REPO="kingfadzi/nvim-offline"
 VERSION="${1:-$(date +%Y%m%d)}"
 OUTFILE="nvim-offline-${VERSION}.tar.gz"
 
 log() { printf '[package] %s\n' "$*"; }
 die() { printf '[package] ERROR: %s\n' "$*" >&2; exit 1; }
+
+[[ -n "${GITHUB_API_TOKEN:-}" ]] || die "GITHUB_API_TOKEN env var not set"
 
 # Directories to bundle (relative to $HOME)
 DIRS=(
@@ -81,16 +88,62 @@ tar czf "$OUTFILE" \
 SIZE="$(du -h "$OUTFILE" | cut -f1)"
 
 log ""
-log "============================================"
-log " Package complete!"
-log "============================================"
-log ""
 log "  File:    $OUTFILE"
 log "  Size:    $SIZE"
 log "  Nvim:    $NVIM_VER"
 log "  Plugins: $PLUGIN_COUNT"
+
+# --- Create GitHub Release ---
+
 log ""
-log "Next steps:"
-log "  1. Upload $OUTFILE as a GitHub Release asset"
-log "  2. On the airgapped WSL machine, download the release"
-log "  3. Run: bash install-nvim-offline.sh $OUTFILE"
+log "Creating GitHub release ${VERSION}..."
+
+# Create the release
+RELEASE_RESPONSE="$(curl -s -X POST \
+  -H "Authorization: token ${GITHUB_API_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"tag_name\": \"${VERSION}\",
+    \"name\": \"Neovim Offline Bundle ${VERSION}\",
+    \"body\": \"Prebuilt Neovim + LazyVim offline bundle.\\n\\n- ${NVIM_VER}\\n- ${PLUGIN_COUNT} plugins (pre-installed)\\n- Mason LSPs/formatters included\\n- Treesitter parsers compiled\\n\\n**Install on airgapped WSL/Linux:**\\n\\\`\\\`\\\`bash\\nbash install-nvim-offline.sh ${OUTFILE}\\n\\\`\\\`\\\`\",
+    \"draft\": false,
+    \"prerelease\": false
+  }" \
+  "https://api.github.com/repos/${GITHUB_REPO}/releases")"
+
+UPLOAD_URL="$(echo "$RELEASE_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('upload_url','').split('{')[0])" 2>/dev/null || true)"
+
+if [[ -z "$UPLOAD_URL" ]]; then
+  log "ERROR creating release. Response:"
+  echo "$RELEASE_RESPONSE"
+  die "Failed to create GitHub release. Check your token permissions."
+fi
+
+log "Release created. Uploading tarball..."
+
+# Upload the tarball as a release asset
+UPLOAD_RESPONSE="$(curl -s -X POST \
+  -H "Authorization: token ${GITHUB_API_TOKEN}" \
+  -H "Content-Type: application/gzip" \
+  --data-binary "@${OUTFILE}" \
+  "${UPLOAD_URL}?name=${OUTFILE}")"
+
+DOWNLOAD_URL="$(echo "$UPLOAD_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('browser_download_url',''))" 2>/dev/null || true)"
+
+if [[ -z "$DOWNLOAD_URL" ]]; then
+  log "ERROR uploading asset. Response:"
+  echo "$UPLOAD_RESPONSE"
+  die "Failed to upload tarball to release."
+fi
+
+log ""
+log "============================================"
+log " Release published!"
+log "============================================"
+log ""
+log "  Release: https://github.com/${GITHUB_REPO}/releases/tag/${VERSION}"
+log "  Download: $DOWNLOAD_URL"
+log ""
+log "On the airgapped WSL machine:"
+log "  1. Download ${OUTFILE} from the release page"
+log "  2. Run: bash install-nvim-offline.sh ${OUTFILE}"
