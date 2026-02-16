@@ -110,7 +110,6 @@ print(json.dumps({
         f'- {sys.argv[3]} plugins (pre-installed)\n'
         f'- Mason LSPs/formatters included\n'
         f'- Treesitter parsers compiled\n\n'
-        f'**Install on airgapped WSL/Linux:**\n'
         f'\`\`\`bash\n'
         f'bash install-nvim-offline.sh {sys.argv[4]}\n'
         f'\`\`\`'
