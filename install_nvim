@@ -1,0 +1,415 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Neovim + LazyVim installer for AlmaLinux 9 / RHEL 9 (including WSL).
+# - Downloads Neovim AppImage (pinned version)
+# - Verifies it's not an HTML/blocked response
+# - Extracts without FUSE
+# - Installs a user-level symlink at ~/.local/bin/nvim
+# - Sets up LazyVim with language extras and AI plugins
+# - Installs Nerd Font (native Linux only, skipped on WSL)
+
+NVIM_VERSION="${NVIM_VERSION:-0.11.2}"
+BASE_DIR="${BASE_DIR:-$HOME/opt/nvim}"
+BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
+NVIM_CONFIG="${NVIM_CONFIG:-$HOME/.config/nvim}"
+
+ASSET_NAME="nvim-linux-x86_64.appimage"
+URL="https://github.com/neovim/neovim-releases/releases/download/v${NVIM_VERSION}/${ASSET_NAME}"
+
+APPIMAGE_PATH="${BASE_DIR}/${ASSET_NAME}"
+EXTRACT_DIR="${BASE_DIR}/squashfs-root"
+NVIM_BIN="${EXTRACT_DIR}/usr/bin/nvim"
+LINK_PATH="${BIN_DIR}/nvim"
+
+log() { printf '[nvim-install] %s\n' "$*"; }
+die() { printf '[nvim-install] ERROR: %s\n' "$*" >&2; exit 1; }
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
+}
+
+is_wsl() {
+  grep -qi microsoft /proc/version 2>/dev/null
+}
+
+# --- preflight ---
+need_cmd curl
+need_cmd file
+need_cmd chmod
+need_cmd rm
+need_cmd mkdir
+need_cmd ln
+need_cmd bash
+need_cmd unzip
+need_cmd git
+
+# make and cc are needed by avante.nvim plugin build step
+if ! command -v make >/dev/null 2>&1 || ! command -v cc >/dev/null 2>&1; then
+  log "WARNING: 'make' and/or 'cc' not found. The avante.nvim AI plugin needs these to build."
+  log "Install them with: sudo dnf install -y gcc make"
+fi
+
+mkdir -p "$BASE_DIR" "$BIN_DIR"
+
+log "Target Neovim version: v${NVIM_VERSION}"
+log "Install dir: $BASE_DIR"
+log "Bin dir: $BIN_DIR"
+is_wsl && log "WSL detected"
+
+# ===========================================================================
+# NEOVIM INSTALL
+# ===========================================================================
+
+# --- cleanup previous install (only our install paths) ---
+if [[ -L "$LINK_PATH" || -f "$LINK_PATH" ]]; then
+  log "Removing existing $LINK_PATH"
+  rm -f "$LINK_PATH"
+fi
+
+if [[ -f "$APPIMAGE_PATH" ]]; then
+  log "Removing existing AppImage $APPIMAGE_PATH"
+  rm -f "$APPIMAGE_PATH"
+fi
+
+if [[ -d "$EXTRACT_DIR" ]]; then
+  log "Removing existing extract dir $EXTRACT_DIR"
+  rm -rf "$EXTRACT_DIR"
+fi
+
+# --- download ---
+log "Downloading: $URL"
+curl -fL --retry 3 --retry-delay 2 -o "$APPIMAGE_PATH" "$URL"
+
+# --- validate download isn't a proxy page / Not Found ---
+SIZE_BYTES="$(wc -c < "$APPIMAGE_PATH" | tr -d ' ')"
+log "Downloaded size: ${SIZE_BYTES} bytes"
+
+if [[ "$SIZE_BYTES" -lt 5000000 ]]; then
+  log "First 200 bytes of file (for diagnostics):"
+  head -c 200 "$APPIMAGE_PATH" || true
+  die "Download is too small to be a real AppImage. Likely blocked/404/proxy page."
+fi
+
+FILE_OUT="$(file -b "$APPIMAGE_PATH" || true)"
+log "file(1) says: $FILE_OUT"
+
+if ! grep -qi 'ELF' <<<"$FILE_OUT"; then
+  log "First 200 bytes of file (for diagnostics):"
+  head -c 200 "$APPIMAGE_PATH" || true
+  die "Downloaded file is not an ELF executable. Likely blocked/HTML/text response."
+fi
+
+# --- extract (no FUSE required) ---
+log "Extracting AppImage (no FUSE)..."
+chmod +x "$APPIMAGE_PATH"
+(cd "$BASE_DIR" && "$APPIMAGE_PATH" --appimage-extract >/dev/null)
+
+# --- verify extracted binary exists ---
+[[ -x "$NVIM_BIN" ]] || die "Expected extracted binary not found at: $NVIM_BIN"
+
+# --- install symlink ---
+log "Linking $NVIM_BIN -> $LINK_PATH"
+ln -sf "$NVIM_BIN" "$LINK_PATH"
+
+# --- ensure ~/.local/bin is on PATH ---
+if [[ ":${PATH}:" != *":${BIN_DIR}:"* ]]; then
+  log "NOTE: $BIN_DIR is not in PATH for this session."
+  log "Add this to ~/.bashrc if needed: export PATH=\"$BIN_DIR:\$PATH\""
+fi
+
+# --- verify ---
+log "Verifying..."
+hash -r 2>/dev/null || true
+"$LINK_PATH" --version
+
+# ===========================================================================
+# LAZYVIM SETUP
+# ===========================================================================
+
+log "Setting up LazyVim..."
+
+# Back up existing config instead of deleting it
+if [[ -d "$NVIM_CONFIG" ]]; then
+  BACKUP="${NVIM_CONFIG}.bak.$(date +%Y%m%d%H%M%S)"
+  log "Backing up existing config to $BACKUP"
+  mv "$NVIM_CONFIG" "$BACKUP"
+fi
+
+# Clean nvim data/state/cache (these are regenerated on launch)
+rm -rf ~/.local/share/nvim ~/.local/state/nvim ~/.cache/nvim
+
+log "Cloning LazyVim starter config..."
+git clone https://github.com/LazyVim/starter "$NVIM_CONFIG"
+rm -rf "${NVIM_CONFIG}/.git"
+log "Removed .git from starter (you can version your own config)"
+
+# ===========================================================================
+# LAZYVIM EXTRAS (built-in language & tool support)
+# ===========================================================================
+
+log "Configuring LazyVim extras..."
+
+LANG_EXTRAS='"lazyvim.plugins.extras.lang.python",
+    "lazyvim.plugins.extras.lang.java",
+    "lazyvim.plugins.extras.lang.typescript",
+    "lazyvim.plugins.extras.lang.json",
+    "lazyvim.plugins.extras.lang.yaml",
+    "lazyvim.plugins.extras.lang.markdown",
+    "lazyvim.plugins.extras.lang.docker",
+    "lazyvim.plugins.extras.lang.ansible"'
+
+if is_wsl; then
+  # WSL: Claude only, no Copilot
+  cat > "${NVIM_CONFIG}/lazyvim.json" <<LAZYJSON
+{
+  "extras": [
+    ${LANG_EXTRAS}
+  ],
+  "news": {},
+  "version": 7
+}
+LAZYJSON
+else
+  # Native Linux: full AI stack (Copilot + Copilot Chat + avante)
+  cat > "${NVIM_CONFIG}/lazyvim.json" <<LAZYJSON
+{
+  "extras": [
+    ${LANG_EXTRAS},
+    "lazyvim.plugins.extras.ai.copilot",
+    "lazyvim.plugins.extras.ai.copilot-chat"
+  ],
+  "news": {},
+  "version": 7
+}
+LAZYJSON
+fi
+
+# ===========================================================================
+# CUSTOM PLUGINS
+# ===========================================================================
+
+mkdir -p "${NVIM_CONFIG}/lua/plugins"
+
+# --- Colorscheme: Catppuccin ---
+log "Configuring colorscheme (catppuccin)..."
+cat > "${NVIM_CONFIG}/lua/plugins/colorscheme.lua" << 'EOF'
+return {
+  {
+    "catppuccin/nvim",
+    name = "catppuccin",
+    priority = 1000,
+    opts = {
+      flavour = "mocha",
+    },
+  },
+  {
+    "LazyVim/LazyVim",
+    opts = {
+      colorscheme = "catppuccin",
+    },
+  },
+}
+EOF
+
+# --- AI: avante.nvim ---
+if is_wsl; then
+  # WSL: Claude only
+  log "Configuring AI plugins (avante.nvim -- Claude only)..."
+  cat > "${NVIM_CONFIG}/lua/plugins/ai.lua" << 'EOF'
+return {
+  {
+    "yetone/avante.nvim",
+    event = "VeryLazy",
+    version = false,
+    build = "make",
+    opts = {
+      provider = "claude",
+      claude = {
+        model = "claude-sonnet-4-20250514",
+        max_tokens = 4096,
+      },
+      -- Set API key in ~/.bashrc:
+      --   export ANTHROPIC_API_KEY="sk-ant-..."
+    },
+    dependencies = {
+      "nvim-treesitter/nvim-treesitter",
+      "stevearc/dressing.nvim",
+      "nvim-lua/plenary.nvim",
+      "MunifTanjim/nui.nvim",
+      "nvim-tree/nvim-web-devicons",
+    },
+  },
+}
+EOF
+else
+  # Native Linux: Claude + GPT + Copilot
+  log "Configuring AI plugins (avante.nvim -- Claude, GPT, Copilot)..."
+  cat > "${NVIM_CONFIG}/lua/plugins/ai.lua" << 'EOF'
+return {
+  {
+    "yetone/avante.nvim",
+    event = "VeryLazy",
+    version = false,
+    build = "make",
+    opts = {
+      -- Default to Claude; switch with :AvanteProvider <name>
+      provider = "claude",
+      claude = {
+        model = "claude-sonnet-4-20250514",
+        max_tokens = 4096,
+      },
+      openai = {
+        model = "gpt-4o",
+      },
+      -- Set API keys in ~/.bashrc:
+      --   export ANTHROPIC_API_KEY="sk-ant-..."
+      --   export OPENAI_API_KEY="sk-..."
+    },
+    dependencies = {
+      "nvim-treesitter/nvim-treesitter",
+      "stevearc/dressing.nvim",
+      "nvim-lua/plenary.nvim",
+      "MunifTanjim/nui.nvim",
+      "nvim-tree/nvim-web-devicons",
+    },
+  },
+}
+EOF
+fi
+
+# --- Editor enhancements ---
+log "Configuring editor plugins..."
+cat > "${NVIM_CONFIG}/lua/plugins/editor.lua" << 'EOF'
+return {
+  -- surround: add/change/delete surrounding quotes, brackets, tags
+  -- Usage: ysaw" (surround word with "), cs"' (change " to '), ds" (delete ")
+  {
+    "kylechui/nvim-surround",
+    version = "*",
+    event = "VeryLazy",
+    opts = {},
+  },
+
+  -- undotree: visual undo history (<leader>U to toggle)
+  {
+    "mbbill/undotree",
+    cmd = "UndotreeToggle",
+    keys = {
+      { "<leader>U", "<cmd>UndotreeToggle<cr>", desc = "Undo Tree" },
+    },
+  },
+
+  -- hardtime: trains you to use proper vim motions instead of spamming hjkl
+  {
+    "m4xshen/hardtime.nvim",
+    event = "VeryLazy",
+    dependencies = { "MunifTanjim/nui.nvim" },
+    opts = {
+      max_count = 3,
+    },
+  },
+}
+EOF
+
+# --- Bash language support (not a built-in LazyVim extra) ---
+log "Configuring Bash language support..."
+cat > "${NVIM_CONFIG}/lua/plugins/lang-bash.lua" << 'EOF'
+return {
+  {
+    "neovim/nvim-lspconfig",
+    opts = {
+      servers = {
+        bashls = {},
+      },
+    },
+  },
+  {
+    "williamboman/mason.nvim",
+    opts = {
+      ensure_installed = {
+        "bash-language-server",
+        "shellcheck",
+        "shfmt",
+      },
+    },
+  },
+}
+EOF
+
+# ===========================================================================
+# NERD FONT
+# ===========================================================================
+
+FONT_NAME="JetBrainsMono"
+FONT_VERSION="${FONT_VERSION:-3.4.0}"
+FONT_DIR="${HOME}/.local/share/fonts"
+FONT_URL="https://github.com/ryanoasis/nerd-fonts/releases/download/v${FONT_VERSION}/${FONT_NAME}.zip"
+FONT_ZIP="/tmp/${FONT_NAME}.zip"
+
+if is_wsl; then
+  log "WSL detected -- skipping Linux font install."
+  log "Install the Nerd Font on Windows instead:"
+  log "  1. Download from: https://www.nerdfonts.com/font-downloads"
+  log "  2. Pick '${FONT_NAME} Nerd Font', extract, select all .ttf, right-click > Install"
+  log "  3. Set your Windows Terminal font to '${FONT_NAME} Nerd Font'"
+elif ls "${FONT_DIR}"/JetBrainsMonoNerd*.ttf &>/dev/null; then
+  log "${FONT_NAME} Nerd Font already installed, skipping."
+else
+  log "Installing ${FONT_NAME} Nerd Font v${FONT_VERSION}..."
+  mkdir -p "$FONT_DIR"
+
+  log "Downloading: $FONT_URL"
+  curl -fL --retry 3 --retry-delay 2 -o "$FONT_ZIP" "$FONT_URL"
+
+  log "Extracting font to $FONT_DIR..."
+  unzip -o -q "$FONT_ZIP" -d "$FONT_DIR"
+  rm -f "$FONT_ZIP"
+
+  if command -v fc-cache >/dev/null 2>&1; then
+    log "Refreshing font cache..."
+    fc-cache -f "$FONT_DIR"
+  fi
+
+  log "Nerd Font installed. Set your terminal font to '${FONT_NAME} Nerd Font'."
+fi
+
+# ===========================================================================
+# POST-INSTALL NOTES
+# ===========================================================================
+
+log ""
+log "============================================"
+log " Installation complete!"
+log "============================================"
+log ""
+log "FIRST LAUNCH:"
+log "  Run 'nvim' -- LazyVim will auto-install all plugins on first start."
+log "  This takes a minute. Let it finish, then restart nvim."
+log ""
+log "AI SETUP:"
+if is_wsl; then
+  log "  Avante:   Set your Claude API key in ~/.bashrc:"
+  log "              export ANTHROPIC_API_KEY=\"your-key\""
+  log "  Then use <leader>aa to open the AI chat panel"
+else
+  log "  Copilot:  Run ':Copilot auth' in nvim to authenticate with GitHub"
+  log "  Avante:   Set API keys in ~/.bashrc:"
+  log "              export ANTHROPIC_API_KEY=\"your-key\"   # Claude"
+  log "              export OPENAI_API_KEY=\"your-key\"      # GPT / Codex"
+  log "  Then use <leader>aa to open the AI chat panel"
+  log "  Switch AI providers with :AvanteProvider claude|openai"
+fi
+log ""
+log "KEY SHORTCUTS (leader = Space):"
+log "  <Space>       Show command palette (which-key)"
+log "  <Space>ff     Find files"
+log "  <Space>fg     Live grep (search in files)"
+log "  <Space>e      File explorer"
+log "  <Space>aa     AI chat (avante)"
+log "  <Space>U      Undo tree"
+log ""
+log "EXTRAS:"
+log "  Run ':LazyExtras' in nvim to browse and enable more language packs."
+log ""
+log "Done."
