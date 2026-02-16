@@ -98,17 +98,33 @@ log "  Plugins: $PLUGIN_COUNT"
 log ""
 log "Creating GitHub release ${VERSION}..."
 
+# Build JSON payload safely with python3 to avoid escaping issues
+RELEASE_JSON="$(python3 -c "
+import json, sys
+print(json.dumps({
+    'tag_name': sys.argv[1],
+    'name': f'Neovim Offline Bundle {sys.argv[1]}',
+    'body': (
+        f'Prebuilt Neovim + LazyVim offline bundle.\n\n'
+        f'- {sys.argv[2]}\n'
+        f'- {sys.argv[3]} plugins (pre-installed)\n'
+        f'- Mason LSPs/formatters included\n'
+        f'- Treesitter parsers compiled\n\n'
+        f'**Install on airgapped WSL/Linux:**\n'
+        f'\`\`\`bash\n'
+        f'bash install-nvim-offline.sh {sys.argv[4]}\n'
+        f'\`\`\`'
+    ),
+    'draft': False,
+    'prerelease': False
+}))
+" "$VERSION" "$NVIM_VER" "$PLUGIN_COUNT" "$OUTFILE")"
+
 # Create the release
 RELEASE_RESPONSE="$(curl -s -X POST \
   -H "Authorization: token ${GITHUB_API_TOKEN}" \
   -H "Content-Type: application/json" \
-  -d "{
-    \"tag_name\": \"${VERSION}\",
-    \"name\": \"Neovim Offline Bundle ${VERSION}\",
-    \"body\": \"Prebuilt Neovim + LazyVim offline bundle.\\n\\n- ${NVIM_VER}\\n- ${PLUGIN_COUNT} plugins (pre-installed)\\n- Mason LSPs/formatters included\\n- Treesitter parsers compiled\\n\\n**Install on airgapped WSL/Linux:**\\n\\\`\\\`\\\`bash\\nbash install-nvim-offline.sh ${OUTFILE}\\n\\\`\\\`\\\`\",
-    \"draft\": false,
-    \"prerelease\": false
-  }" \
+  -d "$RELEASE_JSON" \
   "https://api.github.com/repos/${GITHUB_REPO}/releases")"
 
 UPLOAD_URL="$(echo "$RELEASE_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('upload_url','').split('{')[0])" 2>/dev/null || true)"
