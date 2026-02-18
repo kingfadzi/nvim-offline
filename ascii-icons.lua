@@ -3,7 +3,6 @@
 return {
   -- Disable icon plugins entirely
   { "nvim-tree/nvim-web-devicons", enabled = false },
-  { "echasnovski/mini.icons", enabled = false },
   { "nvim-mini/mini.icons", enabled = false },
 
   -- =====================================================================

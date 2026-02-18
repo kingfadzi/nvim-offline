@@ -225,9 +225,13 @@ return {
     build = "make",
     opts = {
       provider = "claude",
-      claude = {
-        model = "claude-sonnet-4-20250514",
-        max_tokens = 4096,
+      providers = {
+        claude = {
+          model = "claude-sonnet-4-20250514",
+          extra_request_body = {
+            max_tokens = 4096,
+          },
+        },
       },
       -- Set API key in ~/.bashrc:
       --   export ANTHROPIC_API_KEY="sk-ant-..."
@@ -255,12 +259,16 @@ return {
     opts = {
       -- Default to Claude; switch with :AvanteProvider <name>
       provider = "claude",
-      claude = {
-        model = "claude-sonnet-4-20250514",
-        max_tokens = 4096,
-      },
-      openai = {
-        model = "gpt-4o",
+      providers = {
+        claude = {
+          model = "claude-sonnet-4-20250514",
+          extra_request_body = {
+            max_tokens = 4096,
+          },
+        },
+        openai = {
+          model = "gpt-4o",
+        },
       },
       -- Set API keys in ~/.bashrc:
       --   export ANTHROPIC_API_KEY="sk-ant-..."
@@ -300,14 +308,20 @@ return {
     },
   },
 
-  -- hardtime: trains you to use proper vim motions instead of spamming hjkl
+  -- hardtime: disabled — too restrictive for general use
+  -- { "m4xshen/hardtime.nvim" },
+}
+EOF
+
+# --- Pin nvim-treesitter to v0.9.3 (last version that compiles with cc) ---
+# Newer versions use the tree-sitter CLI which requires GLIBC 2.29+,
+# but RHEL 8 / AlmaLinux 8 only has GLIBC 2.28.
+log "Pinning nvim-treesitter to v0.9.3 (GLIBC compat)..."
+cat > "${NVIM_CONFIG}/lua/plugins/treesitter-pin.lua" << 'EOF'
+return {
   {
-    "m4xshen/hardtime.nvim",
-    event = "VeryLazy",
-    dependencies = { "MunifTanjim/nui.nvim" },
-    opts = {
-      max_count = 3,
-    },
+    "nvim-treesitter/nvim-treesitter",
+    version = "v0.9.3",
   },
 }
 EOF
@@ -325,7 +339,7 @@ return {
     },
   },
   {
-    "williamboman/mason.nvim",
+    "mason-org/mason.nvim",
     opts = {
       ensure_installed = {
         "bash-language-server",
@@ -336,6 +350,14 @@ return {
   },
 }
 EOF
+
+# --- ASCII icons (optional override for non-Nerd-Font environments) ---
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ASCII_ICONS="${SCRIPT_DIR}/ascii-icons.lua"
+if [[ -f "$ASCII_ICONS" ]]; then
+  log "Installing ASCII icons config..."
+  cp "$ASCII_ICONS" "${NVIM_CONFIG}/lua/plugins/ascii-icons.lua"
+fi
 
 # ===========================================================================
 # NERD FONT
